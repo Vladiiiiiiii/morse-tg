@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Телеграфный тренажёр азбуки Морзе</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="telegram.js"></script>
+<script src="telegram.js?v=4"></script>
 <style>
   :root{
     --bg: #0b0b12;
@@ -447,7 +447,7 @@
 
 <header>
   <h1>ТЕЛЕГРАФНЫЙ ТРЕНАЖЁР</h1>
-  <div class="subtitle">азбука Морзе · дерево кодов · ввод клавишей ПРОБЕЛ</div>
+  <div class="subtitle">азбука Морзе · дерево кодов</div>
 </header>
 
 <div class="lang-toggle">
@@ -499,10 +499,10 @@
       <div class="row" style="gap:6px;">
         <label class="hint" for="difficulty-select" style="margin-right:2px;">СЛОЖНОСТЬ:</label>
         <select class="ctrl" id="difficulty-select">
-          <option value="super_easy">Super Easy</option>
-          <option value="easy">Easy</option>
-          <option value="medium">Medium</option>
-          <option value="hard">Hard</option>
+          <option value="super_easy">Очень легкий</option>
+          <option value="easy">Легкий</option>
+          <option value="medium">Средний</option>
+          <option value="hard">Сложный</option>
         </select>
         <button class="ctrl" id="btn-prev-level">◀</button>
         <button class="ctrl" id="btn-next-level">▶</button>
@@ -781,11 +781,6 @@
     if (!ch || ch === ' ') return;
     const code = encodeMap[ch.toUpperCase()];
     if (!code) return;
-    if (difficulty === 'easy'){
-      const finalNodeEl = svg.querySelector(`.node[data-code="${cssEsc(code)}"]`);
-      if (finalNodeEl) finalNodeEl.classList.add('target-hint');
-      return;
-    }
     let prefix = '';
     for (const sym of code){
       prefix += sym;
@@ -993,10 +988,19 @@
   let currentLevelIdx = 0;
   let levelStartTime = null, levelFinished = false, levelPlaying = false;
   let fullTypedText = '', targetUpper = '', lpsArr = [], matchLen = 0;
+  // «Очень легкий»: сверяем ввод по словам — ошибка отбрасывает только к началу слова
+  let wordMode = false, wordStart = 0, wordUpper = '', wordLps = [], wordMatch = 0;
   let statsCache = {}, statsLoaded = false;
   let difficulty = 'super_easy';
   const DIFFICULTY_STARS = { super_easy: 1, easy: 2, medium: 3, hard: 4 };
-  const DIFFICULTY_LABELS = { super_easy: 'Super Easy', easy: 'Easy', medium: 'Medium', hard: 'Hard' };
+  const DIFFICULTY_LABELS = { super_easy: 'Очень легкий', easy: 'Легкий', medium: 'Средний', hard: 'Сложный' };
+  // подпись над заданием — своя для каждой сложности
+  const DIFFICULTY_TARGET_HINTS = {
+    super_easy: 'Набери текст (буква сейчас подсвечена на графе выше, нужно заново вводить слово с ошибкой):',
+    easy: 'Набери текст (буква сейчас подсвечена на графе выше, нужно ввести весь текст правильно):',
+    medium: 'Нужная буква не подсвечивается',
+    hard: 'Вводи буквы по памяти'
+  };
 
   // ---------------- sound ----------------
   // на телефоне <audio> не успевает стартовать за короткий тап, поэтому тон
@@ -1446,6 +1450,8 @@
     targetUpper = level.input.toUpperCase();
     lpsArr = computeLPS(targetUpper);
     matchLen = 0;
+    syncWordState();
+    updateLevelTargetHint();
     levelStartTime = null; levelFinished = false; levelPlaying = false;
     document.getElementById('level-complete-row').hidden = true;
     updateLevelStatsDisplay();
@@ -1462,6 +1468,8 @@
     targetUpper = level.input.toUpperCase();
     lpsArr = computeLPS(targetUpper);
     matchLen = targetUpper.length;
+    syncWordState();
+    updateLevelTargetHint();
     fullTypedText = record.typedText;
     levelStartTime = null; levelFinished = true; levelPlaying = false;
     initLevelLog();
@@ -1518,8 +1526,46 @@
     startLevel();
   }
 
+  function isWordCheckpointMode(){ return difficulty === 'super_easy'; }
+
+  // пересобирает состояние текущего слова по уже зачтённой длине matchLen
+  function syncWordState(){
+    wordMode = isWordCheckpointMode();
+    if (matchLen >= targetUpper.length){
+      wordStart = targetUpper.length; wordUpper = ''; wordLps = []; wordMatch = 0;
+      return;
+    }
+    let s = Math.max(0, Math.min(matchLen, targetUpper.length));
+    while (s > 0 && targetUpper[s - 1] !== ' ') s--;        // к началу текущего слова
+    while (s < targetUpper.length && targetUpper[s] === ' ') s++;
+    wordStart = s;
+    let end = targetUpper.indexOf(' ', wordStart);
+    if (end < 0) end = targetUpper.length;
+    wordUpper = targetUpper.slice(wordStart, end);
+    wordLps = computeLPS(wordUpper);
+    wordMatch = Math.max(0, Math.min(matchLen - wordStart, wordUpper.length));
+  }
+
+  function updateLevelTargetHint(){
+    const el = document.getElementById('level-target-hint-label');
+    if (el) el.textContent = DIFFICULTY_TARGET_HINTS[difficulty] || DIFFICULTY_TARGET_HINTS.easy;
+  }
+
   function kmpStep(ch){
     const c = ch.toUpperCase();
+    if (wordMode){
+      if (!wordUpper.length) return;
+      while (wordMatch > 0 && wordUpper[wordMatch] !== c) wordMatch = wordLps[wordMatch - 1];
+      if (wordUpper[wordMatch] === c) wordMatch++;
+      matchLen = wordStart + wordMatch;
+      if (wordMatch >= wordUpper.length){
+        // слово зачтено: дальше ошибка отбросит только к началу следующего слова
+        matchLen = wordStart + wordUpper.length;
+        while (matchLen < targetUpper.length && targetUpper[matchLen] === ' ') matchLen++;
+        syncWordState();
+      }
+      return;
+    }
     while (matchLen > 0 && targetUpper[matchLen] !== c) matchLen = lpsArr[matchLen - 1];
     if (targetUpper[matchLen] === c) matchLen++;
   }
@@ -1709,20 +1755,23 @@
       console.warn('stories/index.json недоступен — читаю истории по запасному списку файлов.');
       indexList = STORY_FILES_FALLBACK;
     }
-    for (const fname of indexList){
-      if (typeof fname !== 'string') continue;
+    // грузим все файлы разом: последовательные запросы на мобильной сети дают заметную задержку
+    const results = await Promise.all(indexList.map(async fname => {
+      if (typeof fname !== 'string') return null;
       try {
         const r = await fetch('stories/' + fname, { cache: 'no-store' });
-        if (!r.ok) { console.warn('Не удалось загрузить stories/' + fname, r.status); continue; }
+        if (!r.ok) { console.warn('Не удалось загрузить stories/' + fname, r.status); return null; }
         const obj = await r.json();
         const err = validateStoryJson(obj);
-        if (err) { console.warn('stories/' + fname + ': ' + err); continue; }
+        if (err) { console.warn('stories/' + fname + ': ' + err); return null; }
         const fallbackId = 'file-' + slugify(fname.replace(/\.json$/i, ''));
-        loaded.push(normalizeStoryObject(obj, fallbackId));
+        return normalizeStoryObject(obj, fallbackId);
       } catch(e){
         console.warn('Ошибка чтения stories/' + fname, e);
+        return null;
       }
-    }
+    }));
+    results.forEach(st => { if (st) loaded.push(st); });
     return loaded;
   }
 
@@ -1809,14 +1858,70 @@
     return null;
   }
 
+  // карточка истории; progress === null — прогресс ещё считается
+  function storyCardHtml(story, progress){
+    const isActive = story.id === activeStoryId;
+    const pct = (progress && progress.total) ? Math.round((progress.completed / progress.total) * 100) : 0;
+    const meta = progress
+      ? `<span>Пройдено: <b style="color:var(--cream)">${progress.completed}/${progress.total}</b> уровней (${pct}%)</span>
+         <span class="stat-stars" style="color:var(--amber);">★</span>
+         <span style="color:var(--cream)">${progress.starsEarned}/${progress.starsMax}</span>`
+      : `<span>Пройдено: <b style="color:var(--dim)">…</b></span>`;
+    return `
+      <div class="story-item-top">
+        <div>
+          <h3>${escapeHtml(story.title)}</h3>
+          <div class="story-desc">${escapeHtml(story.description || 'Без описания.')}</div>
+        </div>
+        ${isActive ? '<span class="story-badge">АКТИВНА</span>' : ''}
+      </div>
+      <div class="story-progress-track"><div class="story-progress-fill" style="width:${pct}%"></div></div>
+      <div class="story-meta-row">${meta}</div>
+      <div class="story-item-actions">
+        ${isActive
+          ? `<button class="ctrl ctrl-primary" data-start-story="${story.id}">НАЧАТЬ ПРОХОЖДЕНИЕ ▶</button>`
+          : `<button class="ctrl" data-select-story="${story.id}">ВЫБРАТЬ</button>`}
+      </div>
+    `;
+  }
+
+  function bindStoryButtons(root){
+    root.querySelectorAll('[data-select-story]').forEach(btn => {
+      btn.addEventListener('click', () => setActiveStory(btn.dataset.selectStory));
+    });
+    root.querySelectorAll('[data-start-story]').forEach(btn => {
+      btn.addEventListener('click', () => startPlaythrough(btn.dataset.startStory));
+    });
+  }
+
+  let storiesRenderToken = 0;
+
   async function renderStoriesList(){
     const container = document.getElementById('stories-list');
-    container.innerHTML = '<div class="stat-empty">Загрузка...</div>';
+    const token = ++storiesRenderToken;
+
+    // список показываем сразу, прогресс дозаполняем по мере готовности
+    container.innerHTML = '';
+    const cards = {};
+    stories.forEach(story => {
+      const div = document.createElement('div');
+      div.className = 'story-item' + (story.id === activeStoryId ? ' active' : '');
+      div.innerHTML = storyCardHtml(story, null);
+      bindStoryButtons(div);
+      container.appendChild(div);
+      cards[story.id] = div;
+    });
+
     const rows = await Promise.all(stories.map(async story => {
       const progress = await loadStoryProgress(story);
+      if (token === storiesRenderToken && cards[story.id]){
+        cards[story.id].innerHTML = storyCardHtml(story, progress);
+        bindStoryButtons(cards[story.id]);
+      }
       return { story, progress };
     }));
-    container.innerHTML = '';
+    if (token !== storiesRenderToken) return;   // список успели перерисовать заново
+
     // от наиболее пройденных к наименее
     rows.sort((a, b) => {
       const pa = a.progress.total ? a.progress.completed / a.progress.total : 0;
@@ -1824,38 +1929,9 @@
       if (pb !== pa) return pb - pa;
       return b.progress.completed - a.progress.completed;
     });
-    rows.forEach(({ story, progress }) => {
-      const isActive = story.id === activeStoryId;
-      const div = document.createElement('div');
-      div.className = 'story-item' + (isActive ? ' active' : '');
-      const pct = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
-      div.innerHTML = `
-        <div class="story-item-top">
-          <div>
-            <h3>${escapeHtml(story.title)}</h3>
-            <div class="story-desc">${escapeHtml(story.description || 'Без описания.')}</div>
-          </div>
-          ${isActive ? '<span class="story-badge">АКТИВНА</span>' : ''}
-        </div>
-        <div class="story-progress-track"><div class="story-progress-fill" style="width:${pct}%"></div></div>
-        <div class="story-meta-row">
-          <span>Пройдено: <b style="color:var(--cream)">${progress.completed}/${progress.total}</b> уровней (${pct}%)</span>
-          <span class="stat-stars" style="color:var(--amber);">★</span>
-          <span style="color:var(--cream)">${progress.starsEarned}/${progress.starsMax}</span>
-        </div>
-        <div class="story-item-actions">
-          ${isActive
-            ? `<button class="ctrl ctrl-primary" data-start-story="${story.id}">НАЧАТЬ ПРОХОЖДЕНИЕ ▶</button>`
-            : `<button class="ctrl" data-select-story="${story.id}">ВЫБРАТЬ</button>`}
-        </div>
-      `;
-      container.appendChild(div);
-    });
-    container.querySelectorAll('[data-select-story]').forEach(btn => {
-      btn.addEventListener('click', () => setActiveStory(btn.dataset.selectStory));
-    });
-    container.querySelectorAll('[data-start-story]').forEach(btn => {
-      btn.addEventListener('click', () => startPlaythrough(btn.dataset.startStory));
+    rows.forEach(({ story }) => {
+      const el = cards[story.id];
+      if (el) container.appendChild(el);        // appendChild переставляет уже вставленный узел
     });
   }
 
@@ -1955,6 +2031,8 @@
   document.getElementById('difficulty-select').value = difficulty;
   document.getElementById('difficulty-select').addEventListener('change', (e) => {
     difficulty = e.target.value;
+    syncWordState();            // пословный режим включается/выключается на лету
+    updateLevelTargetHint();
     updateGraphVisibility();
     showTargetHint();
   });
@@ -1962,6 +2040,7 @@
   ensureStoriesLoaded();
 
   updateTimingInfo();
+  updateLevelTargetHint();
   rebuild();
   updateTape();
   setTab('stories');

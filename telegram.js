@@ -28,8 +28,68 @@
     return String(key).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128);
   }
 
-  var VALUE_LIMIT = 4096;   // ограничение Telegram на размер значения
-  var CLOUD_TIMEOUT = 2500; // если облако молчит — не подвешиваем игру
+  var VALUE_LIMIT = 4096;      // ограничение Telegram на размер значения
+  var CLOUD_TIMEOUT = 2500;    // если облако молчит — не подвешиваем игру
+  var PREFETCH_TIMEOUT = 3500; // общий бюджет на стартовую выгрузку
+  var CHUNK = 40;              // сколько ключей запрашиваем одним getItems
+
+  // Прогресс читается по одному ключу на уровень — это 250+ чтений на экране «ИСТОРИИ».
+  // По одному запросу в облако это десятки секунд, поэтому на старте выгружаем всё
+  // разом (getKeys + getItems пачками), а дальше отдаём из памяти.
+  var cache = null;            // safeKey -> value
+  var prefetchDone = null;     // Promise, ждём его перед первым чтением
+
+  function prefetchAll() {
+    if (prefetchDone) return prefetchDone;
+    prefetchDone = new Promise(function (resolve) {
+      if (!cloud || typeof cloud.getKeys !== 'function' || typeof cloud.getItems !== 'function') {
+        resolve();
+        return;
+      }
+      var finished = false;
+      var budget = setTimeout(function () {
+        if (finished) return;
+        finished = true;
+        dropCloud();           // не успели — работаем на localStorage
+        resolve();
+      }, PREFETCH_TIMEOUT);
+
+      function finish() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(budget);
+        resolve();
+      }
+
+      try {
+        cloud.getKeys(function (err, keys) {
+          if (finished) return;
+          if (err) { dropCloud(); finish(); return; }
+          cache = {};                      // облако прочитано, пусть даже пустое
+          if (!keys || !keys.length) { finish(); return; }
+          var chunks = [];
+          for (var i = 0; i < keys.length; i += CHUNK) chunks.push(keys.slice(i, i + CHUNK));
+          var left = chunks.length;
+          chunks.forEach(function (chunk) {
+            try {
+              cloud.getItems(chunk, function (e2, values) {
+                if (!e2 && values) {
+                  for (var k in values) {
+                    if (values[k] !== '' && values[k] !== null) {
+                      cache[k] = values[k];
+                      localSetBySafe(k, values[k]);
+                    }
+                  }
+                }
+                if (--left <= 0) finish();
+              });
+            } catch (e) { if (--left <= 0) finish(); }
+          });
+        });
+      } catch (e) { dropCloud(); finish(); }
+    });
+    return prefetchDone;
+  }
 
   function localGet(key) {
     try { return localStorage.getItem(key); } catch (e) { return null; }
@@ -41,10 +101,27 @@
     return (value === null || value === undefined) ? null : { value: value };
   }
 
+  // при выгрузке из облака знаем только нормализованный ключ — храним зеркало под ним же
+  function localSetBySafe(safe, value) {
+    try { localStorage.setItem('cloud:' + safe, value); } catch (e) {}
+  }
+  function localGetBySafe(safe) {
+    try { return localStorage.getItem('cloud:' + safe); } catch (e) { return null; }
+  }
+
   window.storage = {
     get: function (key) {
-      return new Promise(function (resolve) {
+      var safe = safeKey(key);
+      return prefetchAll().then(function () {
         var local = localGet(key);
+        if (local === null) local = localGetBySafe(safe);   // зеркало стартовой выгрузки
+
+        // всё, что есть в облаке, уже лежит в памяти — сеть больше не трогаем
+        if (cache) {
+          var hit = cache[safe];
+          return wrap(hit === undefined || hit === '' ? local : hit);
+        }
+        return new Promise(function (resolve) {
         if (!cloud || typeof cloud.getItem !== 'function') { resolve(wrap(local)); return; }
 
         var settled = false;
@@ -75,18 +152,22 @@
           clearTimeout(timer);
           resolve(wrap(local));
         }
+        });
       });
     },
 
     set: function (key, value) {
       var str = String(value);
+      var safe = safeKey(key);
       localSet(key, str);                 // локально пишем всегда
+      localSetBySafe(safe, str);
+      if (cache) cache[safe] = str;       // держим память свежей, чтение уже не пойдёт в сеть
       return new Promise(function (resolve) {
         if (!cloud || typeof cloud.setItem !== 'function') { resolve(); return; }
         // слишком длинную запись облако не примет — остаётся только локальная копия
         if (str.length > VALUE_LIMIT) { resolve(); return; }
         try {
-          cloud.setItem(safeKey(key), str, function (err) {
+          cloud.setItem(safe, str, function (err) {
             if (err) dropCloud();
             resolve();
           });
@@ -94,6 +175,8 @@
       });
     }
   };
+
+  prefetchAll();             // стартуем выгрузку параллельно с загрузкой историй
 
   if (!inTelegram) return;   // открыли в обычном браузере — дальше нечего настраивать
 
